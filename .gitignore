@@ -1,0 +1,5 @@
+/target
+groq_keys.txt
+.env
+*.log
+
