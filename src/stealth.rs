@@ -8,9 +8,20 @@ pub enum HotkeyAction {
     FixCode,            // Ctrl + Shift + F
     ToggleClickThrough, // Ctrl + Shift + C
     ToggleVisibility,   // Ctrl + / or Ctrl + \
+    RegistrationWarning(&'static str),
 }
 
 static SHARED_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+#[cfg(windows)]
+pub fn stored_hwnd() -> *mut std::ffi::c_void {
+    SHARED_HWND.load(std::sync::atomic::Ordering::SeqCst) as *mut std::ffi::c_void
+}
+
+#[cfg(not(windows))]
+pub fn stored_hwnd() -> *mut std::ffi::c_void {
+    std::ptr::null_mut()
+}
 
 #[cfg(windows)]
 pub fn enable_stealth(hwnd: *mut std::ffi::c_void) -> Result<(), String> {
@@ -157,6 +168,34 @@ pub fn toggle_window_visibility(hwnd: *mut std::ffi::c_void) -> Result<bool, Str
 }
 
 #[cfg(windows)]
+pub fn ensure_window_visible_no_activate() {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        IsWindowVisible, SetWindowPos, ShowWindow, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE,
+        SWP_NOSIZE, SWP_SHOWWINDOW, SW_SHOWNOACTIVATE,
+    };
+
+    let stored = SHARED_HWND.load(std::sync::atomic::Ordering::SeqCst);
+    if stored != 0 {
+        unsafe {
+            let hwnd_val = HWND(stored as _);
+            if !IsWindowVisible(hwnd_val).as_bool() {
+                let _ = ShowWindow(hwnd_val, SW_SHOWNOACTIVATE);
+                let _ = SetWindowPos(
+                    hwnd_val,
+                    HWND_TOPMOST,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE,
+                );
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
 pub fn start_hotkey_listener(
     tx: UnboundedSender<HotkeyAction>,
     egui_ctx: egui::Context,
@@ -171,79 +210,46 @@ pub fn start_hotkey_listener(
 
     std::thread::spawn(move || {
         unsafe {
-            // Hotkey 1: Ctrl + Shift + Enter (0x0D = VK_RETURN)
-            if let Err(e) = RegisterHotKey(
-                HWND(std::ptr::null_mut()),
-                1,
-                MOD_CONTROL | MOD_SHIFT,
-                0x0D,
-            ) {
-                eprintln!("Failed to register hotkey 1 (Ctrl+Shift+Enter): {e}");
-            }
+            let bindings = [
+                (1i32, MOD_CONTROL | MOD_SHIFT, 0x0Du32, "Ctrl+Shift+Enter"),
+                (2, MOD_CONTROL, 0x48, "Ctrl+H"),
+                (3, MOD_CONTROL | MOD_SHIFT, 0x43, "Ctrl+Shift+C"),
+                (4, MOD_CONTROL, 0xBF, "Ctrl+/"),
+                (5, MOD_CONTROL, 0xDC, "Ctrl+\\"),
+                (6, MOD_CONTROL | MOD_SHIFT, 0x46, "Ctrl+Shift+F"),
+            ];
 
-            // Hotkey 2: Ctrl + H (0x48 = 'H')
-            if let Err(e) = RegisterHotKey(
-                HWND(std::ptr::null_mut()),
-                2,
-                MOD_CONTROL,
-                0x48,
-            ) {
-                eprintln!("Failed to register hotkey 2 (Ctrl+H): {e}");
-            }
-
-            // Hotkey 3: Ctrl + Shift + C (0x43 = 'C') - Toggle Click-Through
-            if let Err(e) = RegisterHotKey(
-                HWND(std::ptr::null_mut()),
-                3,
-                MOD_CONTROL | MOD_SHIFT,
-                0x43,
-            ) {
-                eprintln!("Failed to register hotkey 3 (Ctrl+Shift+C): {e}");
-            }
-
-            // Hotkey 4: Ctrl + / (0xBF = VK_OEM_2) - Primary Toggle Visibility (Hide/Show)
-            if let Err(e) = RegisterHotKey(
-                HWND(std::ptr::null_mut()),
-                4,
-                MOD_CONTROL,
-                0xBF,
-            ) {
-                eprintln!("Failed to register hotkey 4 (Ctrl+/): {e}");
-            }
-
-            // Hotkey 5: Ctrl + \ (0xDC = VK_OEM_5) - Alternate Toggle Visibility
-            if let Err(e) = RegisterHotKey(
-                HWND(std::ptr::null_mut()),
-                5,
-                MOD_CONTROL,
-                0xDC,
-            ) {
-                eprintln!("Failed to register hotkey 5 (Ctrl+\\): {e}");
-            }
-
-            // Hotkey 6: Ctrl + Shift + F (0x46 = 'F') - Fix Failed Test Case / Debug Error
-            if let Err(e) = RegisterHotKey(
-                HWND(std::ptr::null_mut()),
-                6,
-                MOD_CONTROL | MOD_SHIFT,
-                0x46,
-            ) {
-                eprintln!("Failed to register hotkey 6 (Ctrl+Shift+F): {e}");
+            for (id, mods, vk, label) in bindings {
+                if RegisterHotKey(HWND(std::ptr::null_mut()), id, mods, vk).is_err() {
+                    let _ = tx.send(HotkeyAction::RegistrationWarning(label));
+                    egui_ctx.request_repaint();
+                }
             }
 
             let mut msg = MSG::default();
             while GetMessageW(&mut msg, HWND(std::ptr::null_mut()), 0, 0).as_bool() {
                 if msg.message == WM_HOTKEY {
                     match msg.wParam.0 {
-                        1 => { let _ = tx.send(HotkeyAction::SmartAssist); }
-                        2 => { let _ = tx.send(HotkeyAction::SolveCode); }
-                        3 => { let _ = tx.send(HotkeyAction::ToggleClickThrough); }
+                        1 => {
+                            ensure_window_visible_no_activate();
+                            let _ = tx.send(HotkeyAction::SmartAssist);
+                        }
+                        2 => {
+                            ensure_window_visible_no_activate();
+                            let _ = tx.send(HotkeyAction::SolveCode);
+                        }
+                        3 => {
+                            let _ = tx.send(HotkeyAction::ToggleClickThrough);
+                        }
                         4 | 5 => {
                             // Directly toggle Win32 window visibility in the message pump thread
                             // (avoids Winit event loop starvation when window is hidden)
                             let _ = toggle_window_visibility(std::ptr::null_mut());
                         }
-                        6 => { let _ = tx.send(HotkeyAction::FixCode); }
+                        6 => {
+                            ensure_window_visible_no_activate();
+                            let _ = tx.send(HotkeyAction::FixCode);
+                        }
                         _ => {}
                     }
                     // CRITICAL: Force egui event loop to wake up immediately even in click-through mode!
