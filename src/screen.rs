@@ -6,11 +6,12 @@ mod windows_impl {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::Graphics::Gdi::{
         BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
-        ReleaseDC, SelectObject, SetBrushOrgEx, SetStretchBltMode, StretchBlt, BITMAPINFO,
-        BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HALFTONE, HBITMAP, HDC, HGDIOBJ, SRCCOPY,
+        GetMonitorInfoW, MonitorFromWindow, ReleaseDC, SelectObject, SetBrushOrgEx, SetStretchBltMode,
+        StretchBlt, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HALFTONE, HBITMAP, HDC,
+        HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST, SRCCOPY,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetDesktopWindow, GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN,
+        GetForegroundWindow, GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN,
     };
 
     struct ScreenDcGuard {
@@ -61,8 +62,30 @@ mod windows_impl {
 
     pub fn capture_screen_jpeg_base64() -> Result<String, String> {
         unsafe {
-            let width = GetSystemMetrics(SM_CXSCREEN);
-            let height = GetSystemMetrics(SM_CYSCREEN);
+            let mut origin_x = 0i32;
+            let mut origin_y = 0i32;
+            let mut width = GetSystemMetrics(SM_CXSCREEN);
+            let mut height = GetSystemMetrics(SM_CYSCREEN);
+
+            // Capture the monitor holding the active foreground window (falls back to primary monitor)
+            let fg = GetForegroundWindow();
+            let hmon = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
+            if !hmon.is_invalid() {
+                let mut mi = MONITORINFO {
+                    cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                    ..Default::default()
+                };
+                if GetMonitorInfoW(hmon, &mut mi).as_bool() {
+                    let mw = mi.rcMonitor.right - mi.rcMonitor.left;
+                    let mh = mi.rcMonitor.bottom - mi.rcMonitor.top;
+                    if mw > 0 && mh > 0 {
+                        origin_x = mi.rcMonitor.left;
+                        origin_y = mi.rcMonitor.top;
+                        width = mw;
+                        height = mh;
+                    }
+                }
+            }
 
             if width <= 0 || height <= 0 {
                 return Err(format!("Invalid screen dimensions: {}x{}", width, height));
@@ -83,7 +106,8 @@ mod windows_impl {
                 (width, height)
             };
 
-            let hwnd = GetDesktopWindow();
+            // NULL HWND gives the virtual-screen DC spanning all monitors
+            let hwnd = HWND(std::ptr::null_mut());
             let screen_hdc = GetDC(hwnd);
             if screen_hdc.is_invalid() {
                 return Err("Failed to obtain desktop DC".to_string());
@@ -120,8 +144,8 @@ mod windows_impl {
                     target_w,
                     target_h,
                     screen_hdc,
-                    0,
-                    0,
+                    origin_x,
+                    origin_y,
                     SRCCOPY,
                 ) {
                     return Err(format!("BitBlt failed: {e}"));
@@ -137,8 +161,8 @@ mod windows_impl {
                     target_w,
                     target_h,
                     screen_hdc,
-                    0,
-                    0,
+                    origin_x,
+                    origin_y,
                     width,
                     height,
                     SRCCOPY,
@@ -184,14 +208,14 @@ mod windows_impl {
 
             // Convert BGRA to RGB directly in memory
             let mut rgb_buf: Vec<u8> = Vec::with_capacity(total_pixels * 3);
-            for chunk in bgra_buf.chunks_exact(4) {
+            for chunk in bgra_buf.as_chunks::<4>().0 {
                 rgb_buf.push(chunk[2]);
                 rgb_buf.push(chunk[1]);
                 rgb_buf.push(chunk[0]);
             }
 
             let mut jpeg_bytes = Vec::new();
-            let mut encoder = JpegEncoder::new_with_quality(&mut jpeg_bytes, 68);
+            let mut encoder = JpegEncoder::new_with_quality(&mut jpeg_bytes, 85);
             encoder
                 .encode(
                     &rgb_buf,
