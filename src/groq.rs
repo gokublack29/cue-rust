@@ -354,11 +354,12 @@ impl GroqClient {
                         "content": [
                             {
                                 "type": "text",
-                                "text": "Transcribe ONLY what is visible on screen verbatim. Do NOT solve, hint, critique, or explain.\n\
+                                "text": "Transcribe ONLY the primary focused coding problem and code editor on screen verbatim. Ignore unrelated background windows. Do NOT solve, hint, critique, or explain.\n\
                                          Include:\n\
-                                         1. Problem title, full description, examples, and constraints.\n\
-                                         2. Current code in the editor.\n\
-                                         3. Any visible test case input, actual output, expected output, or runtime error."
+                                         1. Selected programming language or file extension (from the editor language dropdown, tab, or syntax).\n\
+                                         2. Problem title, full description, examples, and constraints.\n\
+                                         3. Current code and starter function/class signature in the editor.\n\
+                                         4. Any visible test case input, actual output, expected output, or runtime error."
                             },
                             {
                                 "type": "image_url",

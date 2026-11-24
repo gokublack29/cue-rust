@@ -3,15 +3,15 @@ mod windows_impl {
     use image::codecs::jpeg::JpegEncoder;
     use base64::prelude::*;
 
-    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Foundation::{HWND, POINT};
     use windows::Win32::Graphics::Gdi::{
         BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
-        GetMonitorInfoW, MonitorFromWindow, ReleaseDC, SelectObject, SetBrushOrgEx, SetStretchBltMode,
-        StretchBlt, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HALFTONE, HBITMAP, HDC,
-        HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST, SRCCOPY,
+        GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, ReleaseDC, SelectObject, SetBrushOrgEx,
+        SetStretchBltMode, StretchBlt, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+        HALFTONE, HBITMAP, HDC, HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST, SRCCOPY,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN,
+        GetCursorPos, GetForegroundWindow, GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN,
     };
 
     struct ScreenDcGuard {
@@ -67,9 +67,19 @@ mod windows_impl {
             let mut width = GetSystemMetrics(SM_CXSCREEN);
             let mut height = GetSystemMetrics(SM_CYSCREEN);
 
-            // Capture the monitor holding the active foreground window (falls back to primary monitor)
+            // Capture the monitor of the active non-Cue window; if Cue itself is focused, fall back to cursor monitor
+            let cue_hwnd = crate::stealth::stored_hwnd() as isize;
             let fg = GetForegroundWindow();
-            let hmon = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
+            let hmon = if !fg.is_invalid() && (fg.0 as isize) != cue_hwnd {
+                MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST)
+            } else {
+                let mut pt = POINT::default();
+                if GetCursorPos(&mut pt).is_ok() {
+                    MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST)
+                } else {
+                    MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST)
+                }
+            };
             if !hmon.is_invalid() {
                 let mut mi = MONITORINFO {
                     cbSize: std::mem::size_of::<MONITORINFO>() as u32,
