@@ -414,7 +414,9 @@ impl GroqClient {
                                          1. Selected programming language or file extension (from the editor language dropdown, tab, or syntax).\n\
                                          2. Problem title, full description, examples, and constraints.\n\
                                          3. Current code and starter function/class signature in the editor.\n\
-                                         4. Any visible test case input, actual output, expected output, or runtime error."
+                                         4. Any visible test case input, actual output, expected output, or runtime error.\n\
+                                         5. The starter class line exactly as written, prefixed with \"STARTER_CLASS: \" (skip if there is no class).\n\
+                                         6. The starter method/function signature line exactly as written, prefixed with \"STARTER_SIGNATURE: \" (skip if there is no signature)."
                             },
                             {
                                 "type": "image_url",
@@ -472,7 +474,9 @@ impl GroqClient {
             let _ = tx.send(GroqEvent::Status(status_msg)).await;
             egui_ctx.request_repaint();
 
-            let (staged_messages, staged_user_msg) = build_stage2_messages(&messages, ocr_text);
+            let starter = parse_starter_markers(ocr_text);
+            let (staged_messages, staged_user_msg) =
+                build_stage2_messages(&messages, ocr_text, &starter);
             (self.fast_model.clone(), staged_messages, staged_user_msg)
         } else {
             let last_user = messages
@@ -641,9 +645,39 @@ fn extract_message_text(msg: &serde_json::Value) -> String {
 }
 
 /// Preserves caller system prompt, prior conversation turns, and caller user prompt alongside OCR text.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct StarterCode {
+    pub class_line: Option<String>,
+    pub signature: Option<String>,
+}
+
+fn marker_value(line: &str, marker: &str) -> Option<String> {
+    let rest = line.get(line.find(marker)? + marker.len()..)?;
+    let value = rest
+        .trim_start_matches(|c: char| c == '*' || c == ':' || c == '`' || c.is_whitespace())
+        .trim()
+        .trim_matches('`')
+        .trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+pub(crate) fn parse_starter_markers(ocr_text: &str) -> StarterCode {
+    let mut starter = StarterCode::default();
+    for line in ocr_text.lines() {
+        if starter.class_line.is_none() {
+            starter.class_line = marker_value(line, "STARTER_CLASS");
+        }
+        if starter.signature.is_none() {
+            starter.signature = marker_value(line, "STARTER_SIGNATURE");
+        }
+    }
+    starter
+}
+
 pub(crate) fn build_stage2_messages(
     messages: &[serde_json::Value],
     ocr_text: &str,
+    starter: &StarterCode,
 ) -> (Vec<serde_json::Value>, serde_json::Value) {
     let mut staged = Vec::new();
     let total_in = messages.len();
@@ -664,7 +698,7 @@ pub(crate) fn build_stage2_messages(
         .map(extract_message_text)
         .unwrap_or_default();
 
-    let combined_user_text = if caller_user_text.trim().is_empty() {
+    let mut combined_user_text = if caller_user_text.trim().is_empty() {
         format!("Screen content transcribed verbatim:\n{}", ocr_text.trim())
     } else {
         format!(
@@ -673,6 +707,25 @@ pub(crate) fn build_stage2_messages(
             ocr_text.trim()
         )
     };
+
+    if starter.class_line.is_some() || starter.signature.is_some() {
+        combined_user_text.push_str(
+            "\n\nStarter code from the editor. Keep these lines exactly and fill in the body only:\n",
+        );
+        if let Some(class_line) = &starter.class_line {
+            combined_user_text.push_str("STARTER_CLASS: ");
+            combined_user_text.push_str(class_line);
+            combined_user_text.push('\n');
+        }
+        if let Some(signature) = &starter.signature {
+            combined_user_text.push_str("STARTER_SIGNATURE: ");
+            combined_user_text.push_str(signature);
+            combined_user_text.push('\n');
+        }
+        combined_user_text.push_str(
+            "Do not rename the class, method, parameters, or type hints. Do not add a second class. Output the full class in one code block.",
+        );
+    }
 
     let staged_user_msg = json!({
         "role": "user",
@@ -925,7 +978,8 @@ mod tests {
             }),
         ];
 
-        let (staged, user_turn) = build_stage2_messages(&msgs, "Expected 6, got 5");
+        let (staged, user_turn) =
+            build_stage2_messages(&msgs, "Expected 6, got 5", &StarterCode::default());
         assert_eq!(staged.len(), 4);
         assert_eq!(staged[0]["content"], "Caller system");
         assert_eq!(staged[1]["content"], "Turn 1 OCR problem");
@@ -934,6 +988,31 @@ mod tests {
         assert!(last.contains("Fix the WA on test 3"));
         assert!(last.contains("Expected 6, got 5"));
         assert_eq!(user_turn["content"], staged[3]["content"]);
+    }
+
+    #[test]
+    fn test_parse_starter_markers_handles_markdown() {
+        let ocr = "Problem text\n**STARTER_CLASS:** class Solution:\nSTARTER_SIGNATURE: def checkString(self, s: str) -> bool:\n";
+        let starter = parse_starter_markers(ocr);
+        assert_eq!(starter.class_line.as_deref(), Some("class Solution:"));
+        assert_eq!(
+            starter.signature.as_deref(),
+            Some("def checkString(self, s: str) -> bool:")
+        );
+    }
+
+    #[test]
+    fn test_stage2_injects_starter_anchor() {
+        let msgs = vec![json!({"role": "user", "content": "Solve this"})];
+        let starter = StarterCode {
+            class_line: Some("class Solution:".to_string()),
+            signature: Some("def checkString(self, s: str) -> bool:".to_string()),
+        };
+        let (staged, _) = build_stage2_messages(&msgs, "OCR text", &starter);
+        let last = staged.last().unwrap()["content"].as_str().unwrap();
+        assert!(last.contains("STARTER_CLASS: class Solution:"));
+        assert!(last.contains("STARTER_SIGNATURE: def checkString(self, s: str) -> bool:"));
+        assert!(last.contains("Do not rename the class"));
     }
 
     #[test]

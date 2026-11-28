@@ -44,6 +44,6 @@ The two-stage pipeline expects Groq's stream format. A change in that format can
 
 ## Testing
 
-There are 19 tests. Eighteen run by default. The skipped one needs real API keys and an image.
+There are 21 tests. Twenty run by default. The skipped one needs real API keys and an image.
 
 No automated test checks the real window, hotkeys, or stealth flags. Those were checked by running the app on Windows.
