@@ -5,6 +5,8 @@ pub mod screen;
 pub mod stealth;
 pub mod ui;
 
+pub const WINDOW_TITLE: &str = "Cue";
+
 use eframe::egui;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -24,8 +26,6 @@ fn main() -> eframe::Result {
     // Global hotkey channel
     let (hotkey_tx, hotkey_rx) = mpsc::unbounded_channel();
 
-    let window_title = "Cue - AI Stealth Assistant";
-
     let screen_w = unsafe {
         windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
             windows::Win32::UI::WindowsAndMessaging::SM_CXSCREEN,
@@ -38,7 +38,7 @@ fn main() -> eframe::Result {
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title(window_title)
+            .with_title(WINDOW_TITLE)
             .with_position([pos_x, pos_y])
             .with_inner_size([default_width, default_height])
             .with_min_inner_size([380.0, 220.0])
@@ -51,7 +51,7 @@ fn main() -> eframe::Result {
     };
 
     eframe::run_native(
-        window_title,
+        WINDOW_TITLE,
         native_options,
         Box::new(move |cc| {
             // Start hotkey listener with egui_ctx so hotkeys instantly wake up the event loop, even in pass-through mode

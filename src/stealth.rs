@@ -1,3 +1,4 @@
+use crate::WINDOW_TITLE;
 use eframe::egui;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -54,7 +55,7 @@ fn focus_existing_window() {
         FindWindowW, SetForegroundWindow, ShowWindow, SW_SHOW,
     };
 
-    let title = HSTRING::from("Cue - AI Stealth Assistant");
+    let title = HSTRING::from(WINDOW_TITLE);
     // The first instance may still be creating its window.
     for _ in 0..20 {
         unsafe {
@@ -205,7 +206,7 @@ pub fn toggle_window_visibility(hwnd: *mut std::ffi::c_void) -> Result<bool, Str
         if stored != 0 {
             stored
         } else {
-            let title = HSTRING::from("Cue - AI Stealth Assistant");
+            let title = HSTRING::from(WINDOW_TITLE);
             if let Ok(found) = unsafe { FindWindowW(None, &title) } {
                 if !found.is_invalid() {
                     SHARED_HWND.store(found.0 as isize, std::sync::atomic::Ordering::SeqCst);
