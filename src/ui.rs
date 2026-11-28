@@ -187,6 +187,9 @@ impl CueApp {
             }
         }
         cc.egui_ctx.set_fonts(fonts);
+        // Static text stays non-selectable so no I-beam cursor appears over the overlay.
+        cc.egui_ctx
+            .style_mut(|style| style.interaction.selectable_labels = false);
 
         // Load stored keys from next to the exe first, then the working directory.
         let loaded_keys = Self::load_keys();
