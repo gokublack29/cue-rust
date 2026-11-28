@@ -23,6 +23,58 @@ pub fn stored_hwnd() -> *mut std::ffi::c_void {
     std::ptr::null_mut()
 }
 
+/// Returns false when another Cue process already holds the instance lock.
+#[cfg(windows)]
+pub fn acquire_single_instance() -> bool {
+    if mutex_already_held("Local\\cue-rust-single-instance") {
+        focus_existing_window();
+        return false;
+    }
+    true
+}
+
+#[cfg(windows)]
+fn mutex_already_held(name: &str) -> bool {
+    use windows::core::HSTRING;
+    use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+    use windows::Win32::System::Threading::CreateMutexW;
+
+    let name = HSTRING::from(name);
+    // The handle stays open for the process lifetime, so the mutex lives until exit.
+    let Ok(_handle) = (unsafe { CreateMutexW(None, false, &name) }) else {
+        return false;
+    };
+    unsafe { GetLastError() == ERROR_ALREADY_EXISTS }
+}
+
+#[cfg(windows)]
+fn focus_existing_window() {
+    use windows::core::HSTRING;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, SetForegroundWindow, ShowWindow, SW_SHOW,
+    };
+
+    let title = HSTRING::from("Cue - AI Stealth Assistant");
+    // The first instance may still be creating its window.
+    for _ in 0..20 {
+        unsafe {
+            if let Ok(hwnd) = FindWindowW(None, &title) {
+                if !hwnd.is_invalid() {
+                    let _ = ShowWindow(hwnd, SW_SHOW);
+                    let _ = SetForegroundWindow(hwnd);
+                    return;
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+#[cfg(not(windows))]
+pub fn acquire_single_instance() -> bool {
+    true
+}
+
 #[cfg(windows)]
 pub fn enable_stealth(hwnd: *mut std::ffi::c_void) -> Result<(), String> {
     use windows::Win32::Foundation::HWND;
@@ -331,5 +383,13 @@ mod tests {
     fn test_hotkey_action_enum() {
         assert_ne!(HotkeyAction::SmartAssist, HotkeyAction::SolveCode);
         assert_ne!(HotkeyAction::SmartAssist, HotkeyAction::ToggleClickThrough);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_single_instance_mutex() {
+        let name = format!("Local\\cue-rust-test-{}", std::process::id());
+        assert!(!mutex_already_held(&name));
+        assert!(mutex_already_held(&name));
     }
 }

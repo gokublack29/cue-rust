@@ -1,14 +1,15 @@
 #[cfg(windows)]
 mod windows_impl {
-    use image::codecs::jpeg::JpegEncoder;
     use base64::prelude::*;
+    use image::codecs::jpeg::JpegEncoder;
 
     use windows::Win32::Foundation::{HWND, POINT};
     use windows::Win32::Graphics::Gdi::{
-        BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
-        GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, ReleaseDC, SelectObject, SetBrushOrgEx,
-        SetStretchBltMode, StretchBlt, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
-        HALFTONE, HBITMAP, HDC, HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST, SRCCOPY,
+        BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
+        GetDIBits, GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, ReleaseDC, SelectObject,
+        SetBrushOrgEx, SetStretchBltMode, StretchBlt, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+        DIB_RGB_COLORS, HALFTONE, HBITMAP, HDC, HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+        SRCCOPY,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         GetCursorPos, GetForegroundWindow, GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN,
@@ -106,10 +107,12 @@ mod windows_impl {
             const MAX_LONG_EDGE: i32 = 1920;
             let (target_w, target_h) = if width > MAX_LONG_EDGE || height > MAX_LONG_EDGE {
                 if width >= height {
-                    let h = ((height as f64) * (MAX_LONG_EDGE as f64 / width as f64)).round() as i32;
+                    let h =
+                        ((height as f64) * (MAX_LONG_EDGE as f64 / width as f64)).round() as i32;
                     (MAX_LONG_EDGE, h.max(1))
                 } else {
-                    let w = ((width as f64) * (MAX_LONG_EDGE as f64 / height as f64)).round() as i32;
+                    let w =
+                        ((width as f64) * (MAX_LONG_EDGE as f64 / height as f64)).round() as i32;
                     (w.max(1), MAX_LONG_EDGE)
                 }
             } else {
@@ -122,7 +125,10 @@ mod windows_impl {
             if screen_hdc.is_invalid() {
                 return Err("Failed to obtain desktop DC".to_string());
             }
-            let _screen_guard = ScreenDcGuard { hwnd, hdc: screen_hdc };
+            let _screen_guard = ScreenDcGuard {
+                hwnd,
+                hdc: screen_hdc,
+            };
 
             let mem_hdc = CreateCompatibleDC(screen_hdc);
             if mem_hdc.is_invalid() {
@@ -148,15 +154,7 @@ mod windows_impl {
             if target_w == width && target_h == height {
                 // Pixel-perfect 1:1 native hardware copy: zero interpolation, razor-sharp code text
                 if let Err(e) = BitBlt(
-                    mem_hdc,
-                    0,
-                    0,
-                    target_w,
-                    target_h,
-                    screen_hdc,
-                    origin_x,
-                    origin_y,
-                    SRCCOPY,
+                    mem_hdc, 0, 0, target_w, target_h, screen_hdc, origin_x, origin_y, SRCCOPY,
                 ) {
                     return Err(format!("BitBlt failed: {e}"));
                 }
@@ -165,17 +163,8 @@ mod windows_impl {
                 SetStretchBltMode(mem_hdc, HALFTONE);
                 let _ = SetBrushOrgEx(mem_hdc, 0, 0, None);
                 let blt_ok = StretchBlt(
-                    mem_hdc,
-                    0,
-                    0,
-                    target_w,
-                    target_h,
-                    screen_hdc,
-                    origin_x,
-                    origin_y,
-                    width,
-                    height,
-                    SRCCOPY,
+                    mem_hdc, 0, 0, target_w, target_h, screen_hdc, origin_x, origin_y, width,
+                    height, SRCCOPY,
                 );
                 if !blt_ok.as_bool() {
                     return Err("StretchBlt failed".to_string());

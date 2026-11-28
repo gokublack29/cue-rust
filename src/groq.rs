@@ -111,6 +111,27 @@ impl KeyPool {
         }
     }
 
+    pub fn all_in_cooldown(&self) -> bool {
+        let cooldowns = self.cooldowns.lock().unwrap();
+        let now = Instant::now();
+        !self.keys.is_empty()
+            && self
+                .keys
+                .iter()
+                .enumerate()
+                .all(|(idx, _)| cooldowns.get(&idx).is_some_and(|until| *until > now))
+    }
+
+    pub fn soonest_cooldown_secs(&self) -> Option<u64> {
+        let cooldowns = self.cooldowns.lock().unwrap();
+        let now = Instant::now();
+        cooldowns
+            .values()
+            .filter(|until| **until > now)
+            .min()
+            .map(|until| (*until - now).as_secs().max(1))
+    }
+
     /// Rotates to the next available key that is not in cooldown.
     /// If all keys are in cooldown, picks the one that recovers soonest.
     pub fn rotate_to_next(&self) -> Option<(usize, usize, String)> {
@@ -125,7 +146,11 @@ impl KeyPool {
             let candidate_idx = (old_idx + offset) % total;
             if !self.is_key_in_cooldown(candidate_idx) {
                 self.current_index.store(candidate_idx, Ordering::SeqCst);
-                return Some((old_idx + 1, candidate_idx + 1, self.keys[candidate_idx].clone()));
+                return Some((
+                    old_idx + 1,
+                    candidate_idx + 1,
+                    self.keys[candidate_idx].clone(),
+                ));
             }
         }
 
@@ -206,7 +231,10 @@ impl GroqClient {
         egui_ctx: egui::Context,
         tx: mpsc::Sender<GroqEvent>,
     ) {
-        let image_kb = image_base64.as_ref().map(|s| (s.len() * 3) / 4 / 1024).unwrap_or(0);
+        let image_kb = image_base64
+            .as_ref()
+            .map(|s| (s.len() * 3) / 4 / 1024)
+            .unwrap_or(0);
         let mut messages = Vec::new();
         if let Some(sys) = system_prompt {
             messages.push(json!({
@@ -235,10 +263,12 @@ impl GroqClient {
             }));
         }
 
-        self.stream_messages_request(messages, capture_ms, image_kb, user_start, egui_ctx, tx).await;
+        self.stream_messages_request(messages, capture_ms, image_kb, user_start, egui_ctx, tx)
+            .await;
     }
 
     /// Sends a Groq chat completion payload with 429 key rotation and cooldown tracking.
+    /// When every key is rate-limited, waits for the soonest reset and retries once.
     async fn post_with_retry(
         &self,
         payload: &serde_json::Value,
@@ -246,76 +276,99 @@ impl GroqClient {
         egui_ctx: &egui::Context,
     ) -> Result<(reqwest::Response, usize, Option<u64>), String> {
         let max_attempts = self.pool.total_keys().max(1);
-        let mut attempts = 0;
 
-        while attempts < max_attempts {
-            let (key_idx, current_key) = self
-                .pool
-                .get_current_indexed_key()
-                .ok_or_else(|| "No Groq API keys configured.".to_string())?;
+        for round in 0..2 {
+            let mut attempts = 0;
 
-            let res = self
-                .http
-                .post(GROQ_CHAT_URL)
-                .header("Authorization", format!("Bearer {}", current_key))
-                .header("Content-Type", "application/json")
-                .json(payload)
-                .send()
-                .await
-                .map_err(|e| format!("Network connection failed: {e}"))?;
+            while attempts < max_attempts {
+                let (key_idx, current_key) = self
+                    .pool
+                    .get_current_indexed_key()
+                    .ok_or_else(|| "No Groq API keys configured.".to_string())?;
 
-            let status = res.status();
-            let headers = res.headers().clone();
-
-            let retry_after_secs = headers
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(5);
-
-            let remaining_tokens = headers
-                .get("x-ratelimit-remaining-tokens")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok());
-
-            if status.as_u16() == 429 {
-                attempts += 1;
-                self.pool.mark_cooldown(key_idx, retry_after_secs);
-
-                if let Some((from_i, to_i, _)) = self.pool.rotate_to_next() {
-                    let _ = tx
-                        .send(GroqEvent::KeyRotated {
-                            from_index: from_i,
-                            to_index: to_i,
-                            reason: format!("429 Rate Limit (Retry after {retry_after_secs}s)"),
-                        })
-                        .await;
-                    egui_ctx.request_repaint();
-                    continue;
-                }
-                return Err(format!("Rate limit reached (429). Retry in {retry_after_secs}s."));
-            }
-
-            if !status.is_success() {
-                let err_text = res
-                    .text()
+                let res = self
+                    .http
+                    .post(GROQ_CHAT_URL)
+                    .header("Authorization", format!("Bearer {}", current_key))
+                    .header("Content-Type", "application/json")
+                    .json(payload)
+                    .send()
                     .await
-                    .unwrap_or_else(|_| "Unknown error".to_string());
-                return Err(format!("Groq API error ({status}): {err_text}"));
-            }
+                    .map_err(|e| format!("Network connection failed: {e}"))?;
 
-            if let Some(rem_tok) = remaining_tokens {
-                if rem_tok < PREEMPTIVE_TOKEN_THRESHOLD {
-                    self.pool.mark_cooldown(key_idx, PREEMPTIVE_COOLDOWN_SECS);
-                    let _ = self.pool.rotate_to_next();
+                let status = res.status();
+                let headers = res.headers().clone();
+
+                let retry_after_secs = headers
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(5);
+
+                let remaining_tokens = headers
+                    .get("x-ratelimit-remaining-tokens")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok());
+
+                if status.as_u16() == 429 {
+                    attempts += 1;
+                    self.pool.mark_cooldown(key_idx, retry_after_secs);
+
+                    if self.pool.all_in_cooldown() {
+                        break;
+                    }
+
+                    if let Some((from_i, to_i, _)) = self.pool.rotate_to_next() {
+                        let _ = tx
+                            .send(GroqEvent::KeyRotated {
+                                from_index: from_i,
+                                to_index: to_i,
+                                reason: format!("429 Rate Limit (Retry after {retry_after_secs}s)"),
+                            })
+                            .await;
+                        egui_ctx.request_repaint();
+                        continue;
+                    }
+                    break;
                 }
+
+                if !status.is_success() {
+                    let err_text = res
+                        .text()
+                        .await
+                        .unwrap_or_else(|_| "Unknown error".to_string());
+                    return Err(format!("Groq API error ({status}): {err_text}"));
+                }
+
+                if let Some(rem_tok) = remaining_tokens {
+                    if rem_tok < PREEMPTIVE_TOKEN_THRESHOLD {
+                        self.pool.mark_cooldown(key_idx, PREEMPTIVE_COOLDOWN_SECS);
+                        let _ = self.pool.rotate_to_next();
+                    }
+                }
+
+                return Ok((res, key_idx, remaining_tokens));
             }
 
-            return Ok((res, key_idx, remaining_tokens));
+            if round == 1 {
+                break;
+            }
+
+            let wait_secs = self.pool.soonest_cooldown_secs().unwrap_or(5).clamp(1, 60);
+
+            for remaining in (1..=wait_secs).rev() {
+                let _ = tx
+                    .send(GroqEvent::Status(format!(
+                        "All keys rate-limited. Retrying in {remaining}s..."
+                    )))
+                    .await;
+                egui_ctx.request_repaint();
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
         }
 
         Err(format!(
-            "All {} configured Groq API keys are exhausted or rate-limited.",
+            "All {} configured Groq API keys are rate-limited. Wait a minute and try again.",
             self.pool.total_keys()
         ))
     }
@@ -338,7 +391,9 @@ impl GroqClient {
         }
 
         let image_url_opt = find_last_image_url(&messages);
-        let (final_model, final_messages, user_turn_to_record) = if let Some(img_url) = image_url_opt {
+        let (final_model, final_messages, user_turn_to_record) = if let Some(img_url) =
+            image_url_opt
+        {
             let _ = tx
                 .send(GroqEvent::Status(format!(
                     "Screen ({image_kb}KB) -> transcribing with Qwen OCR..."
@@ -375,7 +430,9 @@ impl GroqClient {
             let ocr_res = match self.post_with_retry(&ocr_payload, &tx, &egui_ctx).await {
                 Ok((res, _, _)) => res,
                 Err(err) => {
-                    let _ = tx.send(GroqEvent::Error(format!("OCR failed: {err}"))).await;
+                    let _ = tx
+                        .send(GroqEvent::Error(format!("OCR failed: {err}")))
+                        .await;
                     egui_ctx.request_repaint();
                     return;
                 }
@@ -418,7 +475,10 @@ impl GroqClient {
             let (staged_messages, staged_user_msg) = build_stage2_messages(&messages, ocr_text);
             (self.fast_model.clone(), staged_messages, staged_user_msg)
         } else {
-            let last_user = messages.last().cloned().unwrap_or_else(|| json!({"role": "user", "content": ""}));
+            let last_user = messages
+                .last()
+                .cloned()
+                .unwrap_or_else(|| json!({"role": "user", "content": ""}));
             (self.fast_model.clone(), messages, last_user)
         };
 
@@ -435,14 +495,15 @@ impl GroqClient {
             payload["reasoning_effort"] = json!("low");
         }
 
-        let (response, _key_idx, remaining_tokens) = match self.post_with_retry(&payload, &tx, &egui_ctx).await {
-            Ok(ok) => ok,
-            Err(err) => {
-                let _ = tx.send(GroqEvent::Error(err)).await;
-                egui_ctx.request_repaint();
-                return;
-            }
-        };
+        let (response, _key_idx, remaining_tokens) =
+            match self.post_with_retry(&payload, &tx, &egui_ctx).await {
+                Ok(ok) => ok,
+                Err(err) => {
+                    let _ = tx.send(GroqEvent::Error(err)).await;
+                    egui_ctx.request_repaint();
+                    return;
+                }
+            };
 
         let mut stream = response.bytes_stream();
         let mut raw_buf: Vec<u8> = Vec::new();
@@ -720,7 +781,12 @@ async fn finalize_stream(
         .map(|t| t.duration_since(user_start).as_millis() as u64)
         .unwrap_or(0);
     let stream_ms = first_token_time
-        .map(|t| user_start.elapsed().saturating_sub(t.duration_since(user_start)).as_millis() as u64)
+        .map(|t| {
+            user_start
+                .elapsed()
+                .saturating_sub(t.duration_since(user_start))
+                .as_millis() as u64
+        })
         .unwrap_or(1);
     let tokens_per_sec = if stream_ms > 0 {
         (token_count as f64) / (stream_ms as f64 / 1000.0)
@@ -828,6 +894,20 @@ mod tests {
         let pool = KeyPool::new(vec!["gsk_only_one".to_string()]);
         assert_eq!(pool.total_keys(), 1);
         assert_eq!(pool.rotate_to_next(), None);
+    }
+
+    #[test]
+    fn test_cooldown_wait_uses_soonest_reset() {
+        let pool = KeyPool::new(vec!["gsk_key1".to_string(), "gsk_key2".to_string()]);
+        assert!(!pool.all_in_cooldown());
+        assert_eq!(pool.soonest_cooldown_secs(), None);
+
+        pool.mark_cooldown(0, 60);
+        assert!(!pool.all_in_cooldown());
+
+        pool.mark_cooldown(1, 2);
+        assert!(pool.all_in_cooldown());
+        assert!((1..=2).contains(&pool.soonest_cooldown_secs().unwrap()));
     }
 
     #[test]

@@ -10,6 +10,10 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 fn main() -> eframe::Result {
+    if !stealth::acquire_single_instance() {
+        return Ok(());
+    }
+
     let rt = Arc::new(
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()

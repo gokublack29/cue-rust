@@ -12,7 +12,7 @@ Hiding the window does not hide the process. A platform can still detect a separ
 
 The app asks Windows to keep Cue out of the taskbar and Alt+Tab. Windows can restore those flags when the window changes, so the app sets them again. On some Windows versions the window may still appear in other system lists, such as Task Manager.
 
-The app assumes a single instance. Two copies can fight over the global hotkeys and the stored window handle.
+Only one copy runs at a time. Starting a second copy brings the first window to the front and exits.
 
 ## Platform
 
@@ -24,13 +24,13 @@ The exe is built locally and is not signed. Windows may show a SmartScreen warni
 
 Groq API keys are stored in plain text in `groq_keys.txt` or `.env`. Anyone with access to the folder can read them.
 
-Keys are loaded from the folder the app starts in. A shortcut with the wrong "start in" folder will show no keys.
+Keys are loaded from the folder next to the exe first, then the folder the app starts in.
 
 The app needs a network connection to Groq. Every captured screenshot is sent to Groq for reading. If that is a problem for the data on screen, do not use the app with that data.
 
 The model names are fixed in the code: `qwen/qwen3.8-27b` for reading the screen and `openai/gpt-oss-120b` for solving. If Groq changes or removes those models, or the key cannot use them, requests fail.
 
-Rate limits are handled by rotating keys. If every key is limited, the request stops. Preemptive rotation depends on a response header. If that header is missing, the app cannot rotate early.
+Rate limits are handled by rotating keys. When every key is limited, the app waits for the soonest reset (up to 60 seconds), shows a countdown, and retries once. If it is still limited, the request stops. Preemptive rotation depends on a response header. If that header is missing, the app cannot rotate early.
 
 ## Screen reading
 
@@ -44,6 +44,6 @@ The two-stage pipeline expects Groq's stream format. A change in that format can
 
 ## Testing
 
-There are 16 tests. Fifteen run by default. The skipped one needs real API keys and an image.
+There are 19 tests. Eighteen run by default. The skipped one needs real API keys and an image.
 
 No automated test checks the real window, hotkeys, or stealth flags. Those were checked by running the app on Windows.

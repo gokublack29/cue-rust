@@ -1,6 +1,6 @@
 use eframe::egui::{self, Color32, ResizeDirection, Rounding, Shadow, Stroke, Vec2};
 use std::fs;
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -188,16 +188,8 @@ impl CueApp {
         }
         cc.egui_ctx.set_fonts(fonts);
 
-        // Load stored keys (groq_keys.txt, .env, or environment variables)
-        let mut loaded_keys = String::new();
-        if Path::new("groq_keys.txt").exists() {
-            if let Ok(content) = fs::read_to_string("groq_keys.txt") {
-                loaded_keys = content;
-            }
-        }
-        if loaded_keys.trim().is_empty() {
-            loaded_keys = Self::load_from_env_files();
-        }
+        // Load stored keys from next to the exe first, then the working directory.
+        let loaded_keys = Self::load_keys();
 
         let hwnd_raw = creation_hwnd(cc);
         #[cfg(windows)]
@@ -246,10 +238,40 @@ impl CueApp {
         }
     }
 
-    fn load_from_env_files() -> String {
-        let candidates = [".env", "cue-rust/.env", "../.env"];
-        for p in candidates {
-            if let Ok(content) = fs::read_to_string(p) {
+    fn config_dirs() -> Vec<PathBuf> {
+        let mut dirs = Vec::new();
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                dirs.push(dir.to_path_buf());
+            }
+        }
+        if let Ok(cwd) = std::env::current_dir() {
+            if !dirs.contains(&cwd) {
+                dirs.push(cwd);
+            }
+        }
+        dirs
+    }
+
+    fn load_keys() -> String {
+        Self::load_keys_from(&Self::config_dirs())
+    }
+
+    fn load_keys_from(dirs: &[PathBuf]) -> String {
+        for dir in dirs {
+            if let Ok(content) = fs::read_to_string(dir.join("groq_keys.txt")) {
+                if !content.trim().is_empty() {
+                    return content;
+                }
+            }
+        }
+
+        let mut env_files: Vec<PathBuf> = dirs.iter().map(|dir| dir.join(".env")).collect();
+        env_files.push(PathBuf::from("cue-rust/.env"));
+        env_files.push(PathBuf::from("../.env"));
+
+        for path in env_files {
+            if let Ok(content) = fs::read_to_string(path) {
                 for line in content.lines() {
                     let trimmed = line.trim();
                     if let Some(rest) = trimmed
@@ -264,10 +286,10 @@ impl CueApp {
                 }
             }
         }
-        if let Ok(k) = std::env::var("GROQ_API_KEYS").or_else(|_| std::env::var("GROQ_API_KEY")) {
-            return k;
-        }
-        String::new()
+
+        std::env::var("GROQ_API_KEYS")
+            .or_else(|_| std::env::var("GROQ_API_KEY"))
+            .unwrap_or_default()
     }
 
     fn sync_key_pool(&mut self) {
@@ -280,9 +302,16 @@ impl CueApp {
         };
     }
 
-    fn save_keys(&mut self) {
-        let _ = fs::write("groq_keys.txt", &self.keys_input);
+    fn save_keys(&mut self) -> bool {
+        let mut saved = false;
+        for dir in Self::config_dirs() {
+            if fs::write(dir.join("groq_keys.txt"), &self.keys_input).is_ok() {
+                saved = true;
+                break;
+            }
+        }
         self.sync_key_pool();
+        saved
     }
 
     pub fn toggle_click_through(&mut self) {
@@ -815,8 +844,11 @@ impl eframe::App for CueApp {
 
                     ui.horizontal(|ui| {
                         if ui.button("Save Keys").clicked() {
-                            self.save_keys();
-                            self.status_message = "Keys saved to groq_keys.txt".to_string();
+                            self.status_message = if self.save_keys() {
+                                "Keys saved to groq_keys.txt".to_string()
+                            } else {
+                                "Could not save keys".to_string()
+                            };
                         }
                         if ui.button("Done").clicked() {
                             self.save_keys();
@@ -1247,11 +1279,26 @@ mod tests {
 
     #[test]
     fn test_load_env_keys_if_present() {
-        if Path::new(".env").exists() {
-            let keys_str = CueApp::load_from_env_files();
+        if std::path::Path::new(".env").exists() {
+            let keys_str = CueApp::load_keys();
             let parsed = parse_keys_str(&keys_str);
             assert!(!parsed.is_empty(), "Expected Groq keys parsed from .env");
         }
+    }
+
+    #[test]
+    fn test_load_keys_prefers_first_dir() {
+        let base = std::env::temp_dir().join(format!("cue-keys-test-{}", std::process::id()));
+        let first = base.join("first");
+        let second = base.join("second");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        fs::write(first.join(".env"), "GROQ_API_KEYS=gsk_first\n").unwrap();
+        fs::write(second.join(".env"), "GROQ_API_KEYS=gsk_second\n").unwrap();
+
+        assert_eq!(CueApp::load_keys_from(&[first, second]), "gsk_first");
+
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
