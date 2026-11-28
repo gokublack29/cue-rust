@@ -752,6 +752,7 @@ dependencies = [
  "egui",
  "futures-util",
  "image",
+ "raw-window-handle",
  "reqwest",
  "serde",
  "serde_json",

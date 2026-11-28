@@ -27,7 +27,9 @@ pub fn stored_hwnd() -> *mut std::ffi::c_void {
 pub fn enable_stealth(hwnd: *mut std::ffi::c_void) -> Result<(), String> {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{
-        SetWindowDisplayAffinity, WINDOW_DISPLAY_AFFINITY,
+        GetWindowDisplayAffinity, GetWindowLongW, SetWindowDisplayAffinity, SetWindowLongW,
+        SetWindowPos, GWL_EXSTYLE, SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+        WINDOW_DISPLAY_AFFINITY, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
     };
 
     if hwnd.is_null() {
@@ -36,11 +38,32 @@ pub fn enable_stealth(hwnd: *mut std::ffi::c_void) -> Result<(), String> {
 
     SHARED_HWND.store(hwnd as isize, std::sync::atomic::Ordering::SeqCst);
 
-    // 0x00000011 is WDA_EXCLUDEFROMCAPTURE
-    let affinity = WINDOW_DISPLAY_AFFINITY(0x00000011);
     unsafe {
-        SetWindowDisplayAffinity(HWND(hwnd as _), affinity)
-            .map_err(|e| format!("Failed to set window display affinity: {e}"))?;
+        let hwnd_val = HWND(hwnd as _);
+
+        // A tool window stays visible but leaves the taskbar and Alt+Tab.
+        let current = GetWindowLongW(hwnd_val, GWL_EXSTYLE);
+        let wanted = (current | (WS_EX_TOOLWINDOW.0 as i32)) & !(WS_EX_APPWINDOW.0 as i32);
+        if wanted != current {
+            SetWindowLongW(hwnd_val, GWL_EXSTYLE, wanted);
+            let _ = SetWindowPos(
+                hwnd_val,
+                HWND(std::ptr::null_mut()),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
+            );
+        }
+
+        // 0x00000011 is WDA_EXCLUDEFROMCAPTURE
+        let mut affinity = 0u32;
+        let _ = GetWindowDisplayAffinity(hwnd_val, &mut affinity);
+        if affinity != 0x00000011 {
+            SetWindowDisplayAffinity(hwnd_val, WINDOW_DISPLAY_AFFINITY(0x00000011))
+                .map_err(|e| format!("Failed to set window display affinity: {e}"))?;
+        }
     }
     Ok(())
 }
@@ -60,7 +83,11 @@ pub fn set_window_opacity(hwnd: *mut std::ffi::c_void, alpha: u8) -> Result<(), 
     unsafe {
         let hwnd_val = HWND(hwnd as _);
         let current_style = GetWindowLongW(hwnd_val, GWL_EXSTYLE);
-        SetWindowLongW(hwnd_val, GWL_EXSTYLE, current_style | (WS_EX_LAYERED.0 as i32));
+        SetWindowLongW(
+            hwnd_val,
+            GWL_EXSTYLE,
+            current_style | (WS_EX_LAYERED.0 as i32),
+        );
         SetLayeredWindowAttributes(hwnd_val, COLORREF(0), alpha, LWA_ALPHA)
             .map_err(|e| format!("SetLayeredWindowAttributes failed: {e}"))?;
         let _ = SetWindowPos(
@@ -112,12 +139,12 @@ pub fn set_click_through(hwnd: *mut std::ffi::c_void, enable: bool) -> Result<()
 
 #[cfg(windows)]
 pub fn toggle_window_visibility(hwnd: *mut std::ffi::c_void) -> Result<bool, String> {
+    use windows::core::HSTRING;
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, IsWindowVisible, SetForegroundWindow, SetWindowPos, ShowWindow,
-        HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOW,
+        FindWindowW, IsWindowVisible, SetForegroundWindow, SetWindowPos, ShowWindow, HWND_TOPMOST,
+        SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOW,
     };
-    use windows::core::HSTRING;
 
     let target_hwnd = if !hwnd.is_null() {
         hwnd as isize
@@ -201,12 +228,8 @@ pub fn start_hotkey_listener(
     egui_ctx: egui::Context,
 ) -> Result<(), String> {
     use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::Input::KeyboardAndMouse::{
-        RegisterHotKey, MOD_CONTROL, MOD_SHIFT,
-    };
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetMessageW, MSG, WM_HOTKEY,
-    };
+    use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, MOD_CONTROL, MOD_SHIFT};
+    use windows::Win32::UI::WindowsAndMessaging::{GetMessageW, MSG, WM_HOTKEY};
 
     std::thread::spawn(move || {
         unsafe {

@@ -24,11 +24,23 @@ const ASSIST_SYSTEM_PROMPT: &str =
     "You are Cue, an elite technical assistant. \
      Be direct and concise. Return ONLY the direct answer or complete runnable code solution with zero filler.";
 
+#[cfg(windows)]
+fn creation_hwnd(cc: &eframe::CreationContext<'_>) -> *mut std::ffi::c_void {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match cc.window_handle().map(|handle| handle.as_raw()) {
+        Ok(RawWindowHandle::Win32(handle)) => handle.hwnd.get() as *mut std::ffi::c_void,
+        _ => std::ptr::null_mut(),
+    }
+}
+
+#[cfg(not(windows))]
+fn creation_hwnd(_cc: &eframe::CreationContext<'_>) -> *mut std::ffi::c_void {
+    std::ptr::null_mut()
+}
+
 pub struct CueApp {
     rt: Arc<tokio::runtime::Runtime>,
     hotkey_rx: mpsc::UnboundedReceiver<HotkeyAction>,
-    window_title: String,
-    stealth_attempted: bool,
     hwnd_raw: *mut std::ffi::c_void,
     pub click_through: bool,
 
@@ -84,14 +96,22 @@ pub fn parse_content_segments(raw: &str) -> Vec<ContentSegment> {
             if let Some(end_idx) = code_body.find("```") {
                 let code = code_body[..end_idx].trim_end().to_string();
                 segments.push(ContentSegment::CodeBlock {
-                    language: if lang.is_empty() { "code".to_string() } else { lang },
+                    language: if lang.is_empty() {
+                        "code".to_string()
+                    } else {
+                        lang
+                    },
                     code,
                 });
                 remaining = &code_body[end_idx + 3..];
             } else {
                 let code = code_body.trim_end().to_string();
                 segments.push(ContentSegment::CodeBlock {
-                    language: if lang.is_empty() { "code".to_string() } else { lang },
+                    language: if lang.is_empty() {
+                        "code".to_string()
+                    } else {
+                        lang
+                    },
                     code,
                 });
                 remaining = "";
@@ -100,7 +120,11 @@ pub fn parse_content_segments(raw: &str) -> Vec<ContentSegment> {
         } else {
             let lang = after_fence.trim().to_string();
             segments.push(ContentSegment::CodeBlock {
-                language: if lang.is_empty() { "code".to_string() } else { lang },
+                language: if lang.is_empty() {
+                    "code".to_string()
+                } else {
+                    lang
+                },
                 code: String::new(),
             });
             remaining = "";
@@ -133,7 +157,6 @@ impl CueApp {
         cc: &eframe::CreationContext<'_>,
         rt: Arc<tokio::runtime::Runtime>,
         hotkey_rx: mpsc::UnboundedReceiver<HotkeyAction>,
-        window_title: &str,
     ) -> Self {
         let mut visuals = egui::Visuals::dark();
         visuals.window_fill = Color32::from_rgba_unmultiplied(15, 17, 24, 175);
@@ -176,6 +199,12 @@ impl CueApp {
             loaded_keys = Self::load_from_env_files();
         }
 
+        let hwnd_raw = creation_hwnd(cc);
+        #[cfg(windows)]
+        if !hwnd_raw.is_null() {
+            let _ = stealth::enable_stealth(hwnd_raw);
+        }
+
         let parsed = parse_keys_str(&loaded_keys);
         let key_pool = Arc::new(KeyPool::new(parsed));
         let show_settings = key_pool.is_empty();
@@ -188,9 +217,7 @@ impl CueApp {
         Self {
             rt,
             hotkey_rx,
-            window_title: window_title.to_string(),
-            stealth_attempted: false,
-            hwnd_raw: std::ptr::null_mut(),
+            hwnd_raw,
             click_through: false,
             keys_input: loaded_keys,
             key_pool,
@@ -382,10 +409,8 @@ impl CueApp {
 
         let key_idx_display = self.key_pool.current_key_index() + 1;
         self.active_key_info = format!("K{}/{}", key_idx_display, self.key_pool.total_keys());
-        let client = GroqClient::new_with_shared_pool(
-            Arc::clone(&self.key_pool),
-            self.http_client.clone(),
-        );
+        let client =
+            GroqClient::new_with_shared_pool(Arc::clone(&self.key_pool), self.http_client.clone());
 
         let (tx, rx) = mpsc::channel(100);
         self.stream_rx = Some(rx);
@@ -444,7 +469,10 @@ impl CueApp {
                 }
             };
 
-            let image_kb = img_opt.as_ref().map(|s| (s.len() * 3) / 4 / 1024).unwrap_or(0);
+            let image_kb = img_opt
+                .as_ref()
+                .map(|s| (s.len() * 3) / 4 / 1024)
+                .unwrap_or(0);
 
             let current_user_msg = if let Some(img) = img_opt {
                 serde_json::json!({
@@ -486,27 +514,8 @@ impl CueApp {
 
     fn apply_stealth_if_needed(&mut self) {
         #[cfg(windows)]
-        if !self.stealth_attempted {
-            use windows::core::HSTRING;
-            use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
-
-            let title_wide = HSTRING::from(&self.window_title);
-            unsafe {
-                if let Ok(hwnd) = FindWindowW(None, &title_wide) {
-                    if !hwnd.is_invalid() {
-                        self.hwnd_raw = hwnd.0 as _;
-                        self.stealth_attempted = true;
-                        match stealth::enable_stealth(hwnd.0 as _) {
-                            Ok(()) => {
-                                let _ = stealth::set_window_opacity(hwnd.0 as _, 190);
-                            }
-                            Err(e) => {
-                                self.status_message = format!("Stealth warning: {e}");
-                            }
-                        }
-                    }
-                }
-            }
+        if !self.hwnd_raw.is_null() {
+            let _ = stealth::enable_stealth(self.hwnd_raw);
         }
     }
 }
@@ -551,12 +560,7 @@ impl eframe::App for CueApp {
                     );
                 }
                 HotkeyAction::SolveCode => {
-                    self.trigger_generation(
-                        Some(SOLVE_CODE_PROMPT.to_string()),
-                        true,
-                        true,
-                        true,
-                    );
+                    self.trigger_generation(Some(SOLVE_CODE_PROMPT.to_string()), true, true, true);
                 }
                 HotkeyAction::FixCode => {
                     self.trigger_fix_error();
@@ -609,9 +613,8 @@ impl eframe::App for CueApp {
                             to_index,
                             reason,
                         } => {
-                            self.status_message = format!(
-                                "Key {from_index} {reason} -> Switched to Key {to_index}!"
-                            );
+                            self.status_message =
+                                format!("Key {from_index} {reason} -> Switched to Key {to_index}!");
                             self.active_key_info =
                                 format!("K{to_index}/{}", self.key_pool.total_keys());
                             ctx.request_repaint();
@@ -1236,7 +1239,10 @@ mod tests {
     fn test_parse_keys_filters_comments_and_delimiters() {
         let raw = "# Groq keys\nnot a key at all\nFOO=barbaz123456789\ngsk_abc123456, gsk_def789012;\n\n  gsk_ghi345678  \n";
         let keys = parse_keys_str(raw);
-        assert_eq!(keys, vec!["gsk_abc123456", "gsk_def789012", "gsk_ghi345678"]);
+        assert_eq!(
+            keys,
+            vec!["gsk_abc123456", "gsk_def789012", "gsk_ghi345678"]
+        );
     }
 
     #[test]

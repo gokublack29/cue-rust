@@ -41,7 +41,8 @@ fn main() -> eframe::Result {
             .with_transparent(true)
             .with_decorations(false)
             .with_resizable(true)
-            .with_always_on_top(),
+            .with_always_on_top()
+            .with_taskbar(false),
         ..Default::default()
     };
 
@@ -53,7 +54,7 @@ fn main() -> eframe::Result {
             if let Err(e) = stealth::start_hotkey_listener(hotkey_tx, cc.egui_ctx.clone()) {
                 eprintln!("Warning: could not register global hotkeys: {e}");
             }
-            Ok(Box::new(ui::CueApp::new(cc, rt, hotkey_rx, window_title)))
+            Ok(Box::new(ui::CueApp::new(cc, rt, hotkey_rx)))
         }),
     )
 }
